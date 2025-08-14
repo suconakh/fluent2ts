@@ -7,11 +7,13 @@ import {
 	type Placeable,
 	type SelectExpression,
 	type VariableReference,
+	type FunctionReference,
 	parse,
-} from "@fluent/syntax";
-import { glob } from "glob";
-import minimist from "minimist";
-import prettier from "prettier";
+	type Expression,
+} from "@fluent/syntax"
+import { glob } from "glob"
+import minimist from "minimist"
+import prettier from "prettier"
 
 const args = minimist(process.argv.slice(2));
 
@@ -23,17 +25,61 @@ function isMessage(x: Entry): x is Message {
 	return x.type === "Message";
 }
 
-function isPlaceable(x: PatternElement): x is Placeable & {
+type ElementWithName = Placeable & {
 	expression:
 		| VariableReference
-		| (SelectExpression & { selector: VariableReference });
-} {
-	return (
-		x.type === "Placeable" &&
-		(x.expression.type === "VariableReference" ||
-			(x.expression.type === "SelectExpression" &&
-				x.expression.selector.type === "VariableReference"))
-	);
+		| FunctionReference
+		| (SelectExpression & { selector: VariableReference })
+}
+
+const EXPR_WITH_VAR_TYPES = new Set<Expression["type"]>([
+	"SelectExpression",
+	"VariableReference",
+	"FunctionReference",
+])
+type ExprWithVarType =
+	typeof EXPR_WITH_VAR_TYPES extends Set<infer R> ? R : never
+
+function isExpressionWithVariable(
+	x: Expression | PatternElement,
+): x is Extract<Expression, { type: ExprWithVarType }> {
+	if (x.type === "SelectExpression") {
+		return isExpressionWithVariable(x.selector)
+	}
+
+	return EXPR_WITH_VAR_TYPES.has(x.type as ExprWithVarType)
+}
+
+function isPlaceable(x: PatternElement | Expression): x is ElementWithName {
+	if (x.type === "Placeable") {
+		return isExpressionWithVariable(x.expression)
+	}
+
+	return isExpressionWithVariable(x)
+}
+
+function extractEntryNames(
+	element: Extract<PatternElement | Expression, { type: ExprWithVarType }>,
+): string[] {
+	if (element.type === "Placeable") {
+		return extractEntryNames(element.expression)
+	}
+
+	if (element.type === "SelectExpression") {
+		return extractEntryNames(element.selector)
+	}
+
+	if (element.type === "FunctionReference") {
+		return element.arguments.positional
+			.filter(isPlaceable)
+			.flatMap(extractEntryNames)
+	}
+
+	if (element.type === "VariableReference") {
+		return [element.id.name]
+	}
+
+	return []
 }
 
 async function processFile(path: string) {
@@ -55,13 +101,9 @@ async function processFile(path: string) {
 			    return `"${entry.id.name}": never;`;
 
 			const entryNames = new Set<string>(
-			    entry.value.elements.filter(isPlaceable).map((element) => {
-			        if (element.expression.type === "SelectExpression") {
-			            return element.expression.selector.id.name
-			        }
-
-			        return element.expression.id.name
-			    })
+				entry.value.elements
+					.filter(isPlaceable)
+					.flatMap(extractEntryNames),
 			)
 
 			const entryLines = Array
